@@ -1,0 +1,401 @@
+diff -rupN a/mDNSPosix/LutronRegisterServices.c b/mDNSPosix/LutronRegisterServices.c
+--- a/mDNSPosix/LutronRegisterServices.c	1969-12-31 19:00:00.000000000 -0500
++++ b/mDNSPosix/LutronRegisterServices.c	2015-03-11 10:10:02.488899081 -0400
+@@ -0,0 +1,343 @@
++/* -*- Mode: C; tab-width: 3 -*-
++ *
++ * Copyright (c) 2015-2016 Lutron Electroincs Ltd. All rights reserved.
++ *
++ *
++    File:		LutronRegisterServices.c
++
++    Contains:	Register and deregister services from a file for mDNSPosix platform.
++ */
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <signal.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <pwd.h>
++#include <sys/types.h>
++
++#include <assert.h>
++#include "mDNSEmbeddedAPI.h"
++
++//*************************************************************************************************************
++typedef struct PosixService PosixService;
++struct PosixService {
++    ServiceRecordSet coreServ;
++    PosixService *next;
++    int serviceID;
++};
++
++static PosixService *gServiceList = NULL;
++// service registration
++static const char *gServiceFile      = "/etc/mdnsd-services.conf";
++static mDNS mDNSStorage;       // mDNS core uses this to store its globals
++//*************************************************************************************************************
++
++#if COMPILER_LIKES_PRAGMA_MARK
++#pragma mark ***** Registration
++#endif
++
++static void RegistrationCallback(mDNS *const m, ServiceRecordSet *const thisRegistration, mStatus status)
++    // mDNS core calls this routine to tell us about the status of
++    // our registration.  The appropriate action to take depends
++    // entirely on the value of status.
++{
++    switch (status) {
++
++        case mStatus_NoError:
++            debugf("Callback: %##s Name Registered",   thisRegistration->RR_SRV.resrec.name->c);
++            // Do nothing; our name was successfully registered.  We may
++            // get more call backs in the future.
++            break;
++
++        case mStatus_NameConflict:
++            debugf("Callback: %##s Name Conflict",     thisRegistration->RR_SRV.resrec.name->c);
++
++            // In the event of a conflict, this sample RegistrationCallback
++            // just calls mDNS_RenameAndReregisterService to automatically
++            // pick a new unique name for the service. For a device such as a
++            // printer, this may be appropriate.  For a device with a user
++            // interface, and a screen, and a keyboard, the appropriate response
++            // may be to prompt the user and ask them to choose a new name for
++            // the service.
++            //
++            // Also, what do we do if mDNS_RenameAndReregisterService returns an
++            // error.  Right now I have no place to send that error to.
++
++            status = mDNS_RenameAndReregisterService(m, thisRegistration, mDNSNULL);
++            assert(status == mStatus_NoError);
++            break;
++
++        case mStatus_MemFree:
++            debugf("Callback: %##s Memory Free",       thisRegistration->RR_SRV.resrec.name->c);
++
++            // When debugging is enabled, make sure that thisRegistration
++            // is not on our gServiceList.
++
++            #if !defined(NDEBUG)
++                {
++                    PosixService *cursor;
++
++                    cursor = gServiceList;
++                    while (cursor != NULL) {
++                        assert(&cursor->coreServ != thisRegistration);
++                        cursor = cursor->next;
++                    }
++                }
++            #endif
++            free(thisRegistration);
++            break;
++
++        default:
++            debugf("Callback: %##s Unknown Status %ld", thisRegistration->RR_SRV.resrec.name->c, status);
++            break;
++    }
++}
++
++static int gServiceID = 0;
++
++static mDNSBool CheckThatRichTextNameIsUsable(const char *richTextName, mDNSBool printExplanation)
++    // Checks that richTextName is reasonable
++    // label and, if it isn't and printExplanation is true, prints
++    // an explanation of why not.
++{
++    mDNSBool result = mDNStrue;
++    if (result && strlen(richTextName) > 63) {
++        if (printExplanation) {
++      	  debugf("%s: Service name is too long (must be 63 characters or less)\n",
++                    gServiceFile);
++        }
++        result = mDNSfalse;
++    }
++    if (result && richTextName[0] == 0) {
++        if (printExplanation) {
++      	  debugf("%s: Service name can't be empty\n", gServiceFile);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool CheckThatServiceTypeIsUsable(const char *serviceType, mDNSBool printExplanation)
++    // Checks that serviceType is a reasonable service type
++    // label and, if it isn't and printExplanation is true, prints
++    // an explanation of why not.
++{
++    mDNSBool result;
++
++    result = mDNStrue;
++    if (result && strlen(serviceType) > 63) {
++        if (printExplanation) {
++      	  debugf("%s: Service type is too long (must be 63 characters or less)\n",
++                    gServiceFile);
++        }
++        result = mDNSfalse;
++    }
++    if (result && serviceType[0] == 0) {
++        if (printExplanation) {
++      	  debugf("%s: Service type can't be empty\n",
++                    gServiceFile);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool CheckThatPortNumberIsUsable(long portNumber, mDNSBool printExplanation)
++    // Checks that portNumber is a reasonable port number
++    // and, if it isn't and printExplanation is true, prints
++    // an explanation of why not.
++{
++    mDNSBool result;
++
++    result = mDNStrue;
++    if (result && (portNumber <= 0 || portNumber > 65535)) {
++        if (printExplanation) {
++      	  debugf("%s: Port number must be in range 1..65535\n",
++                    gServiceFile);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool ReadALine(char *buf, size_t bufSize, FILE *fp)
++// Read a line, skipping over any blank lines or lines starting with '#'
++{
++	mDNSBool good, skip;
++	do {
++		good = (fgets(buf, bufSize, fp) != NULL);
++		skip = (good && (buf[0] == '#'));
++	} while (good && skip);
++	if (good)
++	{
++		int		len = strlen( buf);
++		if ( buf[len - 1] == '\r' || buf[len - 1] == '\n')
++			buf[len - 1] = '\0';
++	}
++    return good;
++}
++
++static mStatus RegisterOneService(const char *  richTextName,
++                                  const char *  serviceType,
++                                  const char *  serviceDomain,
++                                  const mDNSu8  text[],
++                                  mDNSu16       textLen,
++                                  long          portNumber)
++{
++    mStatus             status;
++    PosixService *      thisServ;
++    domainlabel         name;
++    domainname          type;
++    domainname          domain;
++
++    status = mStatus_NoError;
++    thisServ = (PosixService *) malloc(sizeof(*thisServ));
++    if (thisServ == NULL) {
++        status = mStatus_NoMemoryErr;
++    }
++    if (status == mStatus_NoError) {
++        MakeDomainLabelFromLiteralString(&name,  richTextName);
++        MakeDomainNameFromDNSNameString(&type, serviceType);
++        MakeDomainNameFromDNSNameString(&domain, serviceDomain);
++        status = mDNS_RegisterService(&mDNSStorage, &thisServ->coreServ,
++                &name, &type, &domain,				// Name, type, domain
++                NULL, mDNSOpaque16fromIntVal(portNumber),
++                text, textLen,						// TXT data, length
++                NULL, 0,							// Subtypes
++                mDNSInterface_Any,					// Interface ID
++                RegistrationCallback, thisServ, 0);	// Callback and context
++    }
++    if (status == mStatus_NoError) {
++        thisServ->serviceID = gServiceID;
++        gServiceID += 1;
++
++        thisServ->next = gServiceList;
++        gServiceList = thisServ;
++
++        //debugf
++        debugf("%s: Registered service %d, name '%s', type '%s', port %ld\n",
++					  gServiceFile,
++					  thisServ->serviceID,
++					  richTextName,
++					  serviceType,
++					  portNumber);
++
++    } else {
++        if (thisServ != NULL) {
++            free(thisServ);
++        }
++    }
++    return status;
++}
++
++static const char kDefaultServiceDomain[] = "local.";
++
++mStatus RegisterServicesInFile(void)
++{
++    mStatus     status = mStatus_NoError;
++    FILE *      fp = fopen(gServiceFile, "r");
++    int         junk;
++    int32_t err=0;
++
++    if (fp == NULL) {
++		debugf("Could not find the file %s\n", gServiceFile);
++        err=status;
++    }
++    else{
++	    if (status == mStatus_NoError) {
++	        mDNSBool good = mDNStrue;
++	        do {
++				int         ch;
++				char name[256];
++				char type[256];
++				const char *dom = kDefaultServiceDomain;
++				char rawText[1024];
++				mDNSu8  text[sizeof(RDataBody)];
++				unsigned int textLen = 0;
++				char port[256];
++
++	            // Skip over any blank lines.
++	            do ch = fgetc(fp); while ( ch == '\n' || ch == '\r' );
++	            if (ch != EOF) good = (ungetc(ch, fp) == ch);
++
++	            // Read three lines, check them for validity, and register the service.
++				good = ReadALine(name, sizeof(name), fp);
++				if (good) {
++					good = ReadALine(type, sizeof(type), fp);
++				}
++				if (good) {
++					char *p = type;
++					while (*p && *p != ' ') p++;
++					if (*p) {
++						*p = 0;
++						dom = p+1;
++					}
++				}
++				if (good) {
++					good = ReadALine(port, sizeof(port), fp);
++				}
++				if (good) {
++					good =     CheckThatRichTextNameIsUsable(name, mDNSfalse)
++							&& CheckThatServiceTypeIsUsable(type, mDNSfalse)
++							&& CheckThatPortNumberIsUsable(atol(port), mDNSfalse);
++				}
++				if (good) {
++					while (1) {
++						int len;
++						if (!ReadALine(rawText, sizeof(rawText), fp)) break;
++						len = strlen(rawText);
++						if (len <= 255)
++							{
++							unsigned int newlen = textLen + 1 + len;
++							if (len == 0 || newlen >= sizeof(text)) break;
++							text[textLen] = len;
++							mDNSPlatformMemCopy(text + textLen + 1, rawText, len);
++							textLen = newlen;
++							}
++						else
++							debugf("%s: TXT attribute too long for name = %s, type = %s, port = %s\n",
++										gServiceFile, name, type, port);
++					}
++				}
++				if (good) {
++					status = RegisterOneService(name, type, dom, text, textLen, atol(port));
++					if (status != mStatus_NoError) {
++						debugf("%s: Failed to register service, name = %s, type = %s, port = %s\n",
++									gServiceFile, name, type, port);
++						status = mStatus_NoError;       // keep reading
++					}
++				}
++	        } while (good && !feof(fp));
++
++	        if ( ! good ) {
++	            debugf("Error reading service file %s\n", gServiceFile);
++	        }
++	    }
++
++	    if (fp != NULL) {
++	        junk = fclose(fp);
++	        assert(junk == 0);
++	    }
++
++	    if ( status != mStatus_NoError )err=-1;
++	}
++
++    return err;
++}
++
++void DeregisterOurServices(void)
++{
++    PosixService *thisServ;
++
++    while (gServiceList != NULL) {
++        thisServ = gServiceList;
++        gServiceList = thisServ->next;
++
++        mDNS_DeregisterService(&mDNSStorage, &thisServ->coreServ);
++        //debugf
++        debugf("%s: Deregistered service %d\n",gServiceFile,
++                    thisServ->serviceID);
++    }
++}
+diff -rupN a/mDNSPosix/LutronRegisterServices.h b/mDNSPosix/LutronRegisterServices.h
+--- a/mDNSPosix/LutronRegisterServices.h	1969-12-31 19:00:00.000000000 -0500
++++ b/mDNSPosix/LutronRegisterServices.h	2015-03-11 10:08:40.964899225 -0400
+@@ -0,0 +1,13 @@
++/* -*- Mode: C; tab-width: 3 -*-
++ *
++ * Copyright (c) 2015-2016 Lutron Electroincs Ltd. All rights reserved.
++ *
++ */
++
++#ifndef __LutronRegisterServices_h
++#define __LutronRegisterServices_h
++
++extern mStatus RegisterServicesInFile(void);
++extern void DeregisterOurServices(void);
++
++#endif
+diff -rupN a/mDNSPosix/Makefile b/mDNSPosix/Makefile
+--- a/mDNSPosix/Makefile	2015-03-11 10:08:09.728899000 -0400
++++ b/mDNSPosix/Makefile	2015-03-11 10:08:40.964899225 -0400
+@@ -238,7 +238,7 @@ clean:
+ DAEMONOBJS = $(OBJDIR)/PosixDaemon.c.o $(OBJDIR)/mDNSPosix.c.o $(OBJDIR)/mDNSUNP.c.o $(OBJDIR)/mDNS.c.o \
+              $(OBJDIR)/DNSDigest.c.o $(OBJDIR)/uDNS.c.o $(OBJDIR)/DNSCommon.c.o $(OBJDIR)/uds_daemon.c.o \
+              $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/dnssd_ipc.c.o $(OBJDIR)/GenLinkedList.c.o $(OBJDIR)/PlatformCommon.c.o \
+-			 $(OBJDIR)/CryptoAlg.c.o $(OBJDIR)/anonymous.c.o
++			 $(OBJDIR)/CryptoAlg.c.o $(OBJDIR)/anonymous.c.o $(OBJDIR)/LutronRegisterServices.c.o 
+ 
+ # dnsextd target build dnsextd
+ DNSEXTDOBJ = $(OBJDIR)/mDNSPosix.c.o $(OBJDIR)/mDNSUNP.c.o $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/GenLinkedList.c.o $(OBJDIR)/DNSDigest.c.o \
+diff -rupN a/mDNSPosix/PosixDaemon.c b/mDNSPosix/PosixDaemon.c
+--- a/mDNSPosix/PosixDaemon.c	2011-12-01 19:39:45.000000000 -0500
++++ b/mDNSPosix/PosixDaemon.c	2015-03-11 10:08:40.964899225 -0400
+@@ -48,6 +48,7 @@ extern int daemon(int, int);
+ #include "mDNSUNP.h"        // For daemon()
+ #include "uds_daemon.h"
+ #include "PlatformCommon.h"
++#include "LutronRegisterServices.h"
+ 
+ #define CONFIG_FILE "/etc/mdnsd.conf"
+ static domainname DynDNSZone;                // Default wide-area zone for service registration
+@@ -194,9 +195,13 @@ int main(int argc, char **argv)
+             LogMsg("WARNING: mdnsd continuing as root because user \"nobody\" does not exist");
+     }
+ 
++    err = RegisterServicesInFile();
++
+     if (mStatus_NoError == err)
+         err = MainLoop(&mDNSStorage);
+ 
++	 DeregisterOurServices();
++
+     LogMsg("%s stopping", mDNSResponderVersionString);
+ 
+     mDNS_Close(&mDNSStorage);

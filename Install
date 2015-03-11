@@ -1,0 +1,50 @@
+#!/bin/sh -eu
+
+# This script installs all mdnsresponder files to ${DESTDIR}
+# $1 -> mDNSResponder Linux OS build directory
+#########################################################################
+
+cd ${1}/
+
+mkdir -p ${DESTDIR}/usr/sbin
+mkdir -p ${DESTDIR}/etc/init.d/
+cp build/prod/mdnsd ${DESTDIR}/usr/sbin/mdnsd
+cp mdnsd.sh ${DESTDIR}/etc/init.d/mdns
+chmod ugo+x ${DESTDIR}/etc/init.d/mdns
+
+mkdir -p ${DESTDIR}/usr/lib/
+mkdir -p ${DESTDIR}/usr/include/
+cp build/prod/libdns_sd.so ${DESTDIR}/usr/lib/libdns_sd.so.1
+ln -s -f /usr/lib/libdns_sd.so.1 ${DESTDIR}/usr/lib/libdns_sd.so
+cp ../mDNSShared/dns_sd.h ${DESTDIR}/usr/include/dns_sd.h
+
+mkdir -p ${DESTDIR}/usr/share/man/man8/
+mkdir -p ${DESTDIR}/usr/bin
+cp ../mDNSShared/mDNSResponder.8 ${DESTDIR}/usr/share/man/man8/mdnsd.8
+chmod 444 ${DESTDIR}/usr/share/man/man8/mdnsd.8
+cp ../Clients/build/dns-sd ${DESTDIR}/usr/bin/dns-sd
+
+mkdir -p ${DESTDIR}/lib/
+cp build/prod/libnss_mdns-0.2.so ${DESTDIR}/lib/libnss_mdns-0.2.so
+chmod 444 ${DESTDIR}/lib/libnss_mdns-0.2.so
+ln -s -f /lib/libnss_mdns-0.2.so ${DESTDIR}/lib/libnss_mdns.so.2
+
+cp nss_mdns.conf ${DESTDIR}/etc/nss_mdns.conf
+chmod 444 ${DESTDIR}/etc/nss_mdns.conf
+
+cp -f ${DESTDIR}/etc/nsswitch.conf ${DESTDIR}/etc/nsswitch.conf.pre-mdns
+sed -e '/mdns/!s/^\(hosts:.*\)dns\(.*\)/\1mdns dns\2/' ${DESTDIR}/etc/nsswitch.conf.pre-mdns > ${DESTDIR}/etc/nsswitch.conf
+
+mkdir -p ${DESTDIR}/usr/share/man/man5/
+cp nss_mdns.conf.5 ${DESTDIR}/usr/share/man/man5/nss_mdns.conf.5
+chmod 444 ${DESTDIR}/usr/share/man/man5/nss_mdns.conf.5
+
+mkdir -p ${DESTDIR}/usr/share/man/man8
+cp libnss_mdns.8 ${DESTDIR}/usr/share/man/man8/libnss_mdns.8
+chmod 444 ${DESTDIR}/usr/share/man/man8/libnss_mdns.8
+
+mkdir -p ${DESTDIR}/usr/bin
+cp build/prod/mDNS* ${DESTDIR}/usr/bin/
+cp build/prod/dnsextd ${DESTDIR}/usr/bin/
+
+exit 0
