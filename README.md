@@ -24,7 +24,7 @@ How to setup the mDNSResponder source folder?
 How to compile on PC?
 Tested on UBUNTU PC.
 
-1) cd <path-to-mDNSResponder-folder>
+1) cd path-to-mDNSResponder-folder/
 
 2) Clean:
 	make clean os="linux" -C "mdnsPosix"
@@ -50,7 +50,7 @@ Set the following ENV variables with cross toolchain path. I think you can figur
 CC=<gcc-cross-toolchain>
 STRIP=<STRIP-cross-toolchain>
 
-1) cd <path-to-mDNSResponder-folder>
+1) cd path-to-mDNSResponder-folder/
 
 2) Clean:
 	make clean os="linux" CC="$(CC)" LD="$(CC) -shared" STRIP="$(STRIP)" -C "mdnsPosix"
