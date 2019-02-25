@@ -32,8 +32,8 @@ Tested on UBUNTU PC.
 3) Build:
 	make os="linux" -C "mdnsPosix"
 
-4) Insatll:
-	sudo make insatall os="linux" -C "mdnsPosix"
+4) Install:
+	sudo make install os="linux" -C "mdnsPosix"
 
 	-OR-
 
@@ -58,8 +58,8 @@ STRIP=<STRIP-cross-toolchain>
 3) Build:
 	make os="linux" CC="$(CC)" LD="$(CC) -shared" STRIP="$(STRIP)" -C "mdnsPosix"
 
-4) Insatll:
-	sudo make insatall os="linux" CC="$(CC)" LD="$(CC) -shared" STRIP="$(STRIP)" -C "mdnsPosix"
+4) Install:
+	sudo make install os="linux" CC="$(CC)" LD="$(CC) -shared" STRIP="$(STRIP)" -C "mdnsPosix"
 
 	-OR-
 
